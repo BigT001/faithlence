@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { Upload, Send, Sparkles, X } from 'lucide-react';
+import { Upload, Send, Sparkles, X, Menu } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ResultsDisplay } from '@/components/ResultsDisplay';
 import ReactMarkdown from 'react-markdown';
@@ -13,9 +13,10 @@ interface ChatInterfaceProps {
     initialData?: any;
     onClearContent?: () => void;
     isUploading?: boolean;
+    onToggleMenu?: () => void;
 }
 
-export function ChatInterface({ onFileUpload, selectedContentId, initialData, onClearContent, isUploading }: ChatInterfaceProps) {
+export function ChatInterface({ onFileUpload, selectedContentId, initialData, onClearContent, isUploading, onToggleMenu }: ChatInterfaceProps) {
     const [input, setInput] = useState('');
     const [selectedContent, setSelectedContent] = useState<any>(null);
     const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant', content: string }>>([]);
@@ -126,7 +127,35 @@ export function ChatInterface({ onFileUpload, selectedContentId, initialData, on
 
     return (
         <div className="flex-1 flex flex-col h-screen bg-[#0d0d0d]">
-            {/* Header removed for cleaner interactive look */}
+            {/* Mobile Header */}
+            <header className="md:hidden flex items-center justify-between p-4 border-b border-gray-800 bg-[#0d0d0d]/80 backdrop-blur-md sticky top-0 z-30">
+                <div className="flex items-center gap-2">
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={onToggleMenu}
+                        className="text-gray-400 hover:text-white"
+                    >
+                        <Menu className="w-6 h-6" />
+                    </Button>
+                    <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 bg-gradient-to-br from-purple-500 to-blue-500 rounded flex items-center justify-center">
+                            <Sparkles className="w-4 h-4 text-white" />
+                        </div>
+                        <span className="font-bold text-sm tracking-tight text-white">Faithlence</span>
+                    </div>
+                </div>
+                {selectedContent && (
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleClear}
+                        className="text-gray-500 hover:text-white h-8 w-8 p-0"
+                    >
+                        <X className="w-4 h-4" />
+                    </Button>
+                )}
+            </header>
 
             {/* Content Area */}
             <div className="flex-1 overflow-y-auto">
@@ -155,7 +184,7 @@ export function ChatInterface({ onFileUpload, selectedContentId, initialData, on
                                     <div
                                         key={i}
                                         className={cn(
-                                            "flex flex-col gap-3 p-5 rounded-2xl max-w-[90%] animate-in fade-in slide-in-from-bottom-2 duration-500 shadow-sm",
+                                            "flex flex-col gap-3 p-4 md:p-5 rounded-2xl max-w-[95%] md:max-w-[85%] animate-in fade-in slide-in-from-bottom-2 duration-500 shadow-sm",
                                             msg.role === 'user'
                                                 ? "ml-auto bg-gradient-to-br from-purple-600/20 to-purple-800/20 border border-purple-500/30 text-purple-50"
                                                 : "bg-[#161616] border border-white/5 text-gray-200"

@@ -9,15 +9,18 @@ export default function Home() {
   const [selectedContentId, setSelectedContentId] = useState<string | null>(null);
   const [tempAnalysis, setTempAnalysis] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const handleNewChat = () => {
     setSelectedContentId(null);
     setTempAnalysis(null);
+    setIsMobileMenuOpen(false);
   };
 
   const handleSelectHistory = (id: string) => {
     setTempAnalysis(null);
     setSelectedContentId(id);
+    setIsMobileMenuOpen(false);
   };
 
   const handleFileUpload = async (file: File) => {
@@ -67,10 +70,12 @@ export default function Home() {
   return (
     <>
       <AppInitializer />
-      <div className="flex h-screen overflow-hidden bg-[#0d0d0d]">
+      <div className="flex h-screen overflow-hidden bg-[#0d0d0d] relative">
         <Sidebar
           onNewChat={handleNewChat}
           onSelectHistory={handleSelectHistory}
+          isOpen={isMobileMenuOpen}
+          onClose={() => setIsMobileMenuOpen(false)}
         />
         <ChatInterface
           onFileUpload={handleFileUpload}
@@ -78,6 +83,7 @@ export default function Home() {
           initialData={tempAnalysis}
           onClearContent={handleClearContent}
           isUploading={isUploading}
+          onToggleMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
         />
       </div>
     </>
