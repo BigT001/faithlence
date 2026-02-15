@@ -87,7 +87,7 @@ if (!fs.existsSync(TEMP_DIR)) {
  */
 export async function extractAudioFromFile(inputFilePath: string): Promise<string> {
   const fileName = path.basename(inputFilePath, path.extname(inputFilePath));
-  const audioFile = path.join(TEMP_DIR, `${fileName}_audio.m4a`);
+  const audioFile = path.join(TEMP_DIR, `${fileName}_audio.mp3`);
 
   // Skip if already processed
   if (fs.existsSync(audioFile)) {
@@ -101,19 +101,27 @@ export async function extractAudioFromFile(inputFilePath: string): Promise<strin
       outputFile: audioFile
     });
 
-    logger.debug('AudioExtractor:File', 'Executing ffmpeg conversion');
-
     return new Promise((resolve, reject) => {
+      // Use standard MP3 for best compatibility with Gemini and lower file size
       ffmpeg(inputFilePath)
         .noVideo()
-        .audioCodec('aac')
+        .audioCodec('libmp3lame')
         .audioBitrate('128k')
-        .format('adts')
+        .audioChannels(1) // Mono is enough for transcription and smaller file
+        .format('mp3')
+        .on('start', (commandLine) => {
+          logger.debug('AudioExtractor:File', 'ffmpeg command started', { command: commandLine });
+        })
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            logger.debug('AudioExtractor:File', 'Extraction progress', { percent: progress.percent.toFixed(1) + '%' });
+          }
+        })
         .on('end', () => {
-          const fileSize = fs.statSync(audioFile).size;
+          const stats = fs.statSync(audioFile);
           logger.success('AudioExtractor:File', 'Audio extracted successfully', {
             fileName,
-            fileSize,
+            fileSize: `${(stats.size / 1024 / 1024).toFixed(2)}MB`,
             path: audioFile
           });
           resolve(audioFile);
@@ -124,18 +132,10 @@ export async function extractAudioFromFile(inputFilePath: string): Promise<strin
             errorMsg: error.message,
           });
 
-          // Clean up partial file
           if (fs.existsSync(audioFile)) {
-            try {
-              fs.unlinkSync(audioFile);
-            } catch {
-              // Ignore cleanup errors
-            }
+            try { fs.unlinkSync(audioFile); } catch { }
           }
-
-          reject(new Error(
-            `Failed to extract audio from file: ${error instanceof Error ? error.message : 'Unknown error'}`
-          ));
+          reject(new Error(`Failed to extract audio: ${error.message}`));
         })
         .save(audioFile);
     });
@@ -182,9 +182,15 @@ export async function transcribeAudioWithGemini(audioFilePath: string): Promise<
     const audioBuffer = fs.readFileSync(audioFilePath);
     const audioBase64 = audioBuffer.toString('base64');
 
+    // Determine mime type based on extension
+    const ext = path.extname(audioFilePath).toLowerCase();
+    const mimeType = ext === '.mp3' ? 'audio/mpeg' :
+      ext === '.m4a' ? 'audio/mp4' :
+        ext === '.wav' ? 'audio/wav' : 'audio/mp4';
+
     logger.debug('AudioExtractor:Gemini', 'Sending audio to Gemini API', {
       sizeBytes: audioBuffer.length,
-      mimeType: 'audio/mp4'
+      mimeType: mimeType
     });
 
     // Verified models available in this environment
@@ -206,7 +212,7 @@ export async function transcribeAudioWithGemini(audioFilePath: string): Promise<
             response = await model.generateContent([
               {
                 inlineData: {
-                  mimeType: 'audio/mp4',
+                  mimeType: mimeType,
                   data: audioBase64,
                 },
               },

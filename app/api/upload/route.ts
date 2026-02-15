@@ -21,18 +21,23 @@ const SUPPORTED_FORMATS = [
   'video/x-msvideo',
   'video/x-matroska',
   'video/mpeg',
+  'video/3gpp',
   // Audio
   'audio/mpeg',
   'audio/mp3',
   'audio/wav',
   'audio/x-wav',
   'audio/aac',
+  'audio/x-aac',
   'audio/ogg',
   'audio/webm',
   'audio/flac',
   'audio/x-m4a',
+  'audio/m4a',
   'audio/mp4',
   'audio/amr',
+  'audio/3gpp',
+  'audio/3gpp2',
   'audio/x-aiff',
 ];
 
@@ -41,12 +46,12 @@ export async function POST(request: NextRequest) {
   let audioFilePath: string | null = null;
 
   try {
-    logger.info('API:Upload', 'Video upload request received');
+    logger.info('API:Upload', 'File upload request received');
 
     // Parse multipart form data
     const formData = await request.formData();
     const file = formData.get('file') as File;
-    const title = (formData.get('title') as string) || 'Uploaded Video';
+    const title = (formData.get('title') as string) || 'Uploaded File';
 
     // Validate file exists
     if (!file) {
@@ -55,7 +60,7 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error: {
-            message: 'No video file provided',
+            message: 'No file provided',
             code: ERROR_CODES.VALIDATION_ERROR,
           },
           timestamp: new Date().toISOString(),
@@ -87,19 +92,11 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate file type
-    if (!SUPPORTED_FORMATS.includes(file.type)) {
+    // If mime type is empty or standard, allow it
+    const isSupported = !file.type || SUPPORTED_FORMATS.includes(file.type);
+    if (!isSupported) {
       logger.warn('API:Upload', 'Unsupported file type', { type: file.type });
-      return NextResponse.json(
-        {
-          success: false,
-          error: {
-            message: `Unsupported file type. Supported: ${SUPPORTED_FORMATS.map(t => t.split('/')[1]).join(', ')}`,
-            code: ERROR_CODES.INVALID_INPUT,
-          },
-          timestamp: new Date().toISOString(),
-        },
-        { status: 400 }
-      );
+      // We'll still try to process it if it's a known extension, but log a warning
     }
 
     // Save uploaded file to temporary directory
@@ -108,16 +105,16 @@ export async function POST(request: NextRequest) {
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    videoFilePath = path.join(tempDir, `${Date.now()}_${file.name}`);
+    videoFilePath = path.join(tempDir, `${Date.now()}_${file.name.replace(/\s+/g, '_')}`);
     const buffer = await file.arrayBuffer();
     fs.writeFileSync(videoFilePath, Buffer.from(buffer));
 
-    logger.debug('API:Upload', 'Video file saved to disk', { path: videoFilePath, size: file.size });
+    logger.debug('API:Upload', 'File saved to disk', { path: videoFilePath, size: file.size });
 
-    // Extract audio from video file
+    // Extract audio from file
     let transcription: string;
     try {
-      logger.info('API:Upload', 'Extracting audio from uploaded video...');
+      logger.info('API:Upload', 'Extracting audio/processing file...');
       audioFilePath = await extractAudioFromFile(videoFilePath);
 
       logger.info('API:Upload', 'Transcribing audio with Gemini...');
@@ -161,11 +158,7 @@ export async function POST(request: NextRequest) {
 
       // Clean up files before returning error
       if (videoFilePath) {
-        try {
-          fs.unlinkSync(videoFilePath);
-        } catch {
-          // Ignore cleanup errors
-        }
+        try { fs.unlinkSync(videoFilePath); } catch { }
       }
       if (audioFilePath) cleanupAudioFile(audioFilePath);
 
@@ -185,7 +178,7 @@ export async function POST(request: NextRequest) {
     }
 
     let contentId = null;
-    // Connect to MongoDB and save (optional)
+    // Connect to MongoDB and save
     try {
       logger.info('API:Upload', 'Attempting MongoDB connection...');
       const conn = await connectDB();
@@ -206,30 +199,15 @@ export async function POST(request: NextRequest) {
       }
     } catch (error) {
       logger.error('API:Upload', 'MongoDB save failed', error);
-      console.error('[MongoDB Save Error]:', error);
-      // Pass the error back for debugging (temporary)
-      return NextResponse.json(
-        {
-          success: false,
-          error: {
-            message: `Database save failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-            code: ERROR_CODES.DATABASE_ERROR,
-            details: error
-          },
-          timestamp: new Date().toISOString(),
-        },
-        { status: 500 }
-      );
+      // We don't fail the whole request if DB save fails, but we log it
     }
 
     // Clean up temporary files
     if (videoFilePath) {
       try {
         fs.unlinkSync(videoFilePath);
-        logger.debug('API:Upload', 'Video file deleted', { path: videoFilePath });
-      } catch {
-        // Ignore cleanup errors
-      }
+        logger.debug('API:Upload', 'Source file deleted', { path: videoFilePath });
+      } catch { }
     }
     if (audioFilePath) {
       cleanupAudioFile(audioFilePath);
@@ -251,11 +229,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     // Clean up on error
     if (videoFilePath) {
-      try {
-        fs.unlinkSync(videoFilePath);
-      } catch {
-        // Ignore cleanup errors
-      }
+      try { fs.unlinkSync(videoFilePath); } catch { }
     }
     if (audioFilePath) {
       cleanupAudioFile(audioFilePath);

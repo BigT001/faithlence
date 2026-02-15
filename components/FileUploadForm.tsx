@@ -62,22 +62,22 @@ export function FileUploadForm() {
     setUploadProgress(0);
 
     try {
-      // Validate file size (25MB limit)
-      const maxSize = 25 * 1024 * 1024;
+      // Validate file size (500MB limit)
+      const maxSize = 500 * 1024 * 1024;
       if (file.size > maxSize) {
-        throw new Error(`File size exceeds 25MB limit. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+        throw new Error(`File size exceeds 500MB limit. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
       }
 
       // Validate file type
       const supportedTypes = [
-        'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/ogg', 'audio/webm',
-        'audio/flac', 'audio/x-m4a', 'audio/mp4', 'audio/amr', 'audio/x-aiff',
-        'video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'video/mpeg',
+        'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/x-aac', 'audio/ogg', 'audio/webm',
+        'audio/flac', 'audio/x-m4a', 'audio/mp4', 'audio/amr', 'audio/3gpp', 'audio/3gpp2', 'audio/x-aiff',
+        'video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'video/mpeg', 'video/3gpp',
       ];
 
       // Relaxed validation: if file.type is empty (common for some rare types), we rely on server validation
       if (file.type && !supportedTypes.includes(file.type)) {
-        throw new Error(`Unsupported file format: ${file.type}. Please upload a standard audio or video file.`);
+        logger.warn('FileUpload', `File type ${file.type} might be unsupported, but allowing for server-side check`);
       }
 
       // Create form data
@@ -126,7 +126,7 @@ export function FileUploadForm() {
           type="file"
           onChange={handleFileChange}
           disabled={isLoading}
-          accept="audio/*,video/*"
+          accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.aac,.mov,.avi,.3gp"
           className="hidden"
           id="fileInput"
         />
@@ -140,13 +140,23 @@ export function FileUploadForm() {
         </label>
       </div>
 
-      {/* Progress Bar */}
-      {isLoading && uploadProgress > 0 && (
-        <div className="w-full bg-gray-200 rounded-full h-2">
-          <div
-            className="bg-blue-500 h-2 rounded-full transition-all duration-300"
-            style={{ width: `${uploadProgress}%` }}
-          />
+      {/* Progress Bar & Status */}
+      {isLoading && (
+        <div className="space-y-2">
+          <div className="flex justify-between text-sm font-medium text-gray-600">
+            <span>{uploadProgress < 50 ? 'Uploading file...' : uploadProgress < 90 ? 'Compressing & Extracting Audio...' : 'AI Analysis in progress...'}</span>
+            <span>{uploadProgress}%</span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div
+              className={`h-2 rounded-full transition-all duration-500 ${uploadProgress < 50 ? 'bg-blue-500' : uploadProgress < 90 ? 'bg-purple-500' : 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]'
+                }`}
+              style={{ width: `${uploadProgress}%` }}
+            />
+          </div>
+          <p className="text-xs text-gray-500 text-center animate-pulse">
+            {uploadProgress >= 90 ? 'Our AI is deep-diving into your content. This might take a moment...' : 'Processing your media for the best results...'}
+          </p>
         </div>
       )}
 
