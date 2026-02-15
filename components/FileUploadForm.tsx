@@ -6,6 +6,7 @@ import { logger } from '@/lib/logger';
 interface UploadResult {
   success: boolean;
   data?: {
+    id?: string | null;
     fileName: string;
     analysis: {
       transcription?: string;
@@ -170,7 +171,18 @@ export function FileUploadForm() {
       {/* Results */}
       {result?.success && result.data && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-6 space-y-4">
-          <h3 className="text-lg font-semibold text-green-800">✓ Analysis Complete!</h3>
+          {/* Success Header & History Warning */}
+          <div className="flex flex-col gap-2">
+            <h3 className="text-xl font-bold text-green-800 flex items-center gap-2">
+              <span className="text-2xl">✨</span> Analysis Complete!
+            </h3>
+            {!result.data.id && (
+              <div className="bg-amber-100 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm flex items-center gap-2 animate-pulse">
+                <span>⚠️</span>
+                <span><strong>Note:</strong> This analysis couldn't be saved to your history due to a temporary database connection issue.</span>
+              </div>
+            )}
+          </div>
 
           {/* Title */}
           <div>

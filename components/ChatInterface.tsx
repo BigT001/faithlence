@@ -270,7 +270,7 @@ export function ChatInterface({ onFileUpload, selectedContentId, initialData, on
                             type="file"
                             ref={fileInputRef}
                             onChange={handleFileChange}
-                            accept="audio/*,video/*"
+                            accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.aac,.mov,.avi,.3gp"
                             className="hidden"
                         />
                         <Button

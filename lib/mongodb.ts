@@ -11,7 +11,7 @@ interface Cached {
   promise: Promise<typeof mongoose> | null;
 }
 
-let cached: Cached = (global as any).mongoose || { conn: null, promise: null };
+let cached: Cached = (global as any).mongoose;
 
 if (!cached) {
   cached = (global as any).mongoose = { conn: null, promise: null };
@@ -27,7 +27,7 @@ async function connectWithRetry(retryCount = 0): Promise<typeof mongoose> {
       maxPoolSize: 10,
       minPoolSize: 2,
       socketTimeoutMS: 45000,
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 10000,
       family: 4, // Use IPv4
     };
 
@@ -74,7 +74,7 @@ export async function connectDB() {
 export async function initializeIndexes() {
   try {
     const conn = await connectDB();
-    
+
     if (!conn) {
       console.warn('[Indexes] Skipped (database not connected)');
       return;
@@ -87,7 +87,7 @@ export async function initializeIndexes() {
       await db.collection('generatedcontents').createIndex({ createdAt: -1 });
       await db.collection('generatedcontents').createIndex({ sourceType: 1 });
       await db.collection('generatedcontents').createIndex({ sourceUrl: 1 });
-      
+
       console.log('✓ [Indexes] Created successfully');
     }
   } catch (error) {
