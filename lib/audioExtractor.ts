@@ -1,184 +1,24 @@
 /**
- * Audio Extraction Service
- * Handles extraction of audio/transcripts from uploaded files
- * Audio files are transcribed directly using Google Gemini API
+ * Media Transcription Service (Serverless-Compatible)
+ * 
+ * Sends audio/video files DIRECTLY to Google Gemini API for transcription.
+ * No ffmpeg dependency — works on Vercel, Netlify, and any serverless platform.
  */
 
-import path from 'path';
-import fs from 'fs';
-import os from 'os';
 import { logger } from '@/lib/logger';
-import ffmpegStatic from 'ffmpeg-static';
-import ffmpeg from 'fluent-ffmpeg';
-import ffprobeStatic from 'ffprobe-static';
-
-// Set ffmpeg path
-let ffmpegPath: string | null = ffmpegStatic;
-
-// Enhanced path resolution for different environments
-if (ffmpegPath && !fs.existsSync(ffmpegPath)) {
-  // Try to resolve properly if the default path is invalid (common in some monorepos or pnpm setups)
-  try {
-    const pkgPath = require.resolve('ffmpeg-static');
-    const possiblePath = path.join(path.dirname(pkgPath), os.platform() === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
-    if (fs.existsSync(possiblePath)) {
-      ffmpegPath = possiblePath;
-    }
-  } catch (e) {
-    logger.warn('AudioExtractor:Setup', 'Failed to resolve ffmpeg-static path via require', e);
-  }
-}
-
-// Windows specific fix (legacy support)
-if (os.platform() === 'win32' && ffmpegPath && (ffmpegPath.startsWith('\\ROOT') || !fs.existsSync(ffmpegPath))) {
-  const possiblePaths = [
-    path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
-    path.join(process.cwd(), '..', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
-    path.join(process.cwd(), 'resources', 'ffmpeg.exe'),
-  ];
-
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      ffmpegPath = p;
-      break;
-    }
-  }
-}
-
-if (ffmpegPath && fs.existsSync(ffmpegPath)) {
-  logger.info('AudioExtractor:Setup', 'Setting ffmpeg path', { path: ffmpegPath });
-  ffmpeg.setFfmpegPath(ffmpegPath);
-} else {
-  logger.warn('AudioExtractor:Setup', 'ffmpeg-static binary not found. Will attempt to use system ffmpeg if available.');
-  // We don't error here, allowing fallback to system PATH "ffmpeg", but we log it.
-}
-
-// Set ffprobe path
-let ffprobePath: string | null = ffprobeStatic.path;
-
-if (ffprobePath && !fs.existsSync(ffprobePath)) {
-  try {
-    const pkgPath = require.resolve('ffprobe-static');
-    const possiblePath = path.join(path.dirname(pkgPath), 'bin', os.platform() === 'win32' ? 'win32' : 'linux', os.arch(), os.platform() === 'win32' ? 'ffprobe.exe' : 'ffprobe');
-    if (fs.existsSync(possiblePath)) {
-      ffprobePath = possiblePath;
-    }
-  } catch (e) { /* ignore */ }
-}
-
-if (os.platform() === 'win32' && ffprobePath && (ffprobePath.startsWith('\\ROOT') || !fs.existsSync(ffprobePath))) {
-  const possiblePaths = [
-    path.join(process.cwd(), 'node_modules', 'ffprobe-static', 'bin', 'win32', 'x64', 'ffprobe.exe'),
-    path.join(process.cwd(), '..', 'node_modules', 'ffprobe-static', 'bin', 'win32', 'x64', 'ffprobe.exe'),
-  ];
-
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      ffprobePath = p;
-      break;
-    }
-  }
-}
-
-if (ffprobePath && fs.existsSync(ffprobePath)) {
-  logger.info('AudioExtractor:Setup', 'Setting ffprobe path', { path: ffprobePath });
-  ffmpeg.setFfprobePath(ffprobePath);
-} else {
-  logger.warn('AudioExtractor:Setup', 'ffprobe-static binary not found. Will attempt to use system ffprobe if available.');
-}
-
-const TEMP_DIR = path.join(os.tmpdir(), 'faithlence-audio');
-
-// Ensure temp directory exists
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
-}
 
 /**
- * Extract audio from an uploaded video file
- * Converts any video format to MP3 using fluent-ffmpeg
+ * Transcribe audio or video using Google Gemini API.
+ * Accepts raw base64 data and mime type — no file system needed.
  */
-export async function extractAudioFromFile(inputFilePath: string): Promise<string> {
-  const fileName = path.basename(inputFilePath, path.extname(inputFilePath));
-  const audioFile = path.join(TEMP_DIR, `${fileName}_audio.mp3`);
-
-  // Skip if already processed
-  if (fs.existsSync(audioFile)) {
-    logger.debug('AudioExtractor:File', 'Using cached audio file', { fileName });
-    return audioFile;
-  }
-
+export async function transcribeMediaWithGemini(
+  base64Data: string,
+  mimeType: string
+): Promise<string> {
   try {
-    logger.info('AudioExtractor:File', 'Starting audio extraction from file', {
-      inputFile: fileName,
-      outputFile: audioFile
-    });
-
-    return new Promise((resolve, reject) => {
-      // Use standard MP3 for best compatibility with Gemini and lower file size
-      ffmpeg(inputFilePath)
-        .noVideo()
-        .audioCodec('libmp3lame')
-        .audioBitrate('128k')
-        .audioChannels(1) // Mono is enough for transcription and smaller file
-        .format('mp3')
-        .on('start', (commandLine) => {
-          logger.debug('AudioExtractor:File', 'ffmpeg command started', { command: commandLine });
-        })
-        .on('progress', (progress) => {
-          if (progress.percent) {
-            logger.debug('AudioExtractor:File', 'Extraction progress', { percent: progress.percent.toFixed(1) + '%' });
-          }
-        })
-        .on('end', () => {
-          const stats = fs.statSync(audioFile);
-          logger.success('AudioExtractor:File', 'Audio extracted successfully', {
-            fileName,
-            fileSize: `${(stats.size / 1024 / 1024).toFixed(2)}MB`,
-            path: audioFile
-          });
-          resolve(audioFile);
-        })
-        .on('error', (error: Error) => {
-          logger.error('AudioExtractor:File', 'ffmpeg conversion failed', error, {
-            fileName,
-            errorMsg: error.message,
-          });
-
-          if (fs.existsSync(audioFile)) {
-            try { fs.unlinkSync(audioFile); } catch { }
-          }
-          reject(new Error(`Failed to extract audio: ${error.message}`));
-        })
-        .save(audioFile);
-    });
-  } catch (error) {
-    logger.error('AudioExtractor:File', 'Audio extraction failed', error, {
-      fileName,
-      errorMsg: error instanceof Error ? error.message : 'Unknown error',
-    });
-
-    // Clean up partial file
-    if (fs.existsSync(audioFile)) {
-      try {
-        fs.unlinkSync(audioFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
-
-    throw new Error(`Failed to extract audio from file: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
-}
-
-/**
- * Transcribe audio file using Google Gemini API
- */
-export async function transcribeAudioWithGemini(audioFilePath: string): Promise<string> {
-  try {
-    logger.info('AudioExtractor:Gemini', 'Starting Gemini transcription', {
-      file: path.basename(audioFilePath),
-      size: fs.statSync(audioFilePath).size
+    logger.info('Transcriber', 'Starting Gemini transcription', {
+      mimeType,
+      sizeBytes: Math.round((base64Data.length * 3) / 4), // approximate original size
     });
 
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
@@ -189,36 +29,26 @@ export async function transcribeAudioWithGemini(audioFilePath: string): Promise<
     }
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-native-audio-latest' });
 
-    // Read audio file as base64
-    const audioBuffer = fs.readFileSync(audioFilePath);
-    const audioBase64 = audioBuffer.toString('base64');
+    // Models to try in order of preference
+    const modelsToTry = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-flash-latest',
+    ];
 
-    // Determine mime type based on extension
-    const ext = path.extname(audioFilePath).toLowerCase();
-    const mimeType = ext === '.mp3' ? 'audio/mpeg' :
-      ext === '.m4a' ? 'audio/mp4' :
-        ext === '.wav' ? 'audio/wav' : 'audio/mp4';
-
-    logger.debug('AudioExtractor:Gemini', 'Sending audio to Gemini API', {
-      sizeBytes: audioBuffer.length,
-      mimeType: mimeType
-    });
-
-    // Verified models available in this environment
-    const modelsToTry = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest'];
     let lastError: any = null;
     let response: any = null;
 
     for (const modelName of modelsToTry) {
       try {
-        logger.info('AudioExtractor:Gemini', `Attempting transcription with model: ${modelName}`);
+        logger.info('Transcriber', `Attempting transcription with model: ${modelName}`);
         const model = genAI.getGenerativeModel({ model: modelName });
 
-        // Call Gemini API with audio with retry logic
+        // Retry logic for rate limits
         let retries = 0;
-        const maxRetries = 2;
+        const maxRetries = 3;
 
         while (retries < maxRetries) {
           try {
@@ -226,31 +56,32 @@ export async function transcribeAudioWithGemini(audioFilePath: string): Promise<
               {
                 inlineData: {
                   mimeType: mimeType,
-                  data: audioBase64,
+                  data: base64Data,
                 },
               },
-              'Transcribe this audio to text. Return ONLY the full transcription text, nothing else.',
+              'Transcribe this audio/video to text. Return ONLY the full transcription text, nothing else. If there is speech, transcribe it word for word. If there is no speech, describe what you hear.',
             ]);
-            break;
+            break; // Success — exit retry loop
           } catch (error: any) {
             if (error.message?.includes('429') || error.status === 429) {
               retries++;
               const delay = Math.pow(2, retries) * 1000;
+              logger.warn('Transcriber', `Rate limited, retrying in ${delay}ms...`, { retry: retries });
               await new Promise(resolve => setTimeout(resolve, delay));
             } else {
-              throw error;
+              throw error; // Non-retryable error — try next model
             }
           }
         }
 
         if (response) {
-          logger.success('AudioExtractor:Gemini', `Successfully used model: ${modelName}`);
-          break;
+          logger.success('Transcriber', `Successfully transcribed with model: ${modelName}`);
+          break; // Success — exit model loop
         }
       } catch (error: any) {
         lastError = error;
-        logger.warn('AudioExtractor:Gemini', `Model ${modelName} failed`, { error: error.message });
-        continue;
+        logger.warn('Transcriber', `Model ${modelName} failed`, { error: error.message });
+        continue; // Try next model
       }
     }
 
@@ -260,14 +91,18 @@ export async function transcribeAudioWithGemini(audioFilePath: string): Promise<
 
     const transcription = response.response.text();
 
-    logger.success('AudioExtractor:Gemini', 'Transcription complete', {
+    if (!transcription || transcription.trim().length === 0) {
+      throw new Error('Gemini returned an empty transcription. The audio may be too short, silent, or in an unsupported format.');
+    }
+
+    logger.success('Transcriber', 'Transcription complete', {
       transcriptionLength: transcription.length,
       words: transcription.split(/\s+/).length,
     });
 
     return transcription;
   } catch (error) {
-    logger.error('AudioExtractor:Gemini', 'Gemini transcription failed', error, {
+    logger.error('Transcriber', 'Gemini transcription failed', error, {
       errorMsg: error instanceof Error ? error.message : 'Unknown error',
     });
     throw new Error(`Transcription failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -275,18 +110,8 @@ export async function transcribeAudioWithGemini(audioFilePath: string): Promise<
 }
 
 /**
- * Clean up temporary audio files
+ * Clean up temporary audio files (legacy — kept for backward compatibility)
  */
-export function cleanupAudioFile(audioFilePath: string): void {
-  try {
-    if (fs.existsSync(audioFilePath)) {
-      fs.unlinkSync(audioFilePath);
-      logger.debug('AudioExtractor', 'Temporary audio file deleted', { path: audioFilePath });
-    }
-  } catch (error) {
-    logger.warn('AudioExtractor', 'Failed to cleanup audio file', {
-      path: audioFilePath,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
+export function cleanupAudioFile(_audioFilePath: string): void {
+  // No-op in serverless mode — we don't write temp files anymore
 }

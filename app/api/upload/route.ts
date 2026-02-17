@@ -1,18 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { extractAudioFromFile, transcribeAudioWithGemini, cleanupAudioFile } from '@/lib/audioExtractor';
 import { analyzeWithGemini, analyzeImageWithGemini } from '@/lib/gemini';
+import { transcribeMediaWithGemini } from '@/lib/audioExtractor';
 import { connectDB } from '@/lib/mongodb';
 import { ContentModel } from '@/lib/models';
 import { ERROR_CODES } from '@/lib/apiResponse';
 import { logger } from '@/lib/logger';
 
-// Maximum file size: 500MB
-const MAX_FILE_SIZE = 500 * 1024 * 1024;
+// Maximum file size: 20MB (Vercel serverless limit is ~4.5MB request body,
+// but we set a reasonable app-level limit here)
+const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
-// Supported formats (video and audio)
+// Supported formats (video, audio, and images)
 const SUPPORTED_FORMATS = [
   // Video
   'video/mp4',
@@ -38,7 +36,6 @@ const SUPPORTED_FORMATS = [
   'audio/amr',
   'audio/3gpp',
   'audio/3gpp2',
-  'audio/3gpp2',
   'audio/x-aiff',
   // Images
   'image/jpeg',
@@ -48,10 +45,40 @@ const SUPPORTED_FORMATS = [
   'image/heif',
 ];
 
-export async function POST(request: NextRequest) {
-  let videoFilePath: string | null = null;
-  let audioFilePath: string | null = null;
+/**
+ * Determine a valid MIME type from the file's type or extension
+ */
+function resolveMimeType(file: File): string {
+  if (file.type && file.type !== 'application/octet-stream') {
+    return file.type;
+  }
 
+  // Fallback: guess from extension
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  const mimeMap: Record<string, string> = {
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    m4a: 'audio/mp4',
+    aac: 'audio/aac',
+    ogg: 'audio/ogg',
+    flac: 'audio/flac',
+    webm: 'audio/webm',
+    mp4: 'video/mp4',
+    mov: 'video/quicktime',
+    avi: 'video/x-msvideo',
+    mkv: 'video/x-matroska',
+    '3gp': 'video/3gpp',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    heic: 'image/heic',
+  };
+
+  return mimeMap[ext] || 'application/octet-stream';
+}
+
+export async function POST(request: NextRequest) {
   try {
     logger.info('API:Upload', 'File upload request received');
 
@@ -76,10 +103,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const mimeType = resolveMimeType(file);
+
     logger.debug('API:Upload', 'File received', {
       name: file.name,
       size: file.size,
       type: file.type,
+      resolvedMime: mimeType,
     });
 
     // Validate file size
@@ -89,7 +119,7 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error: {
-            message: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`,
+            message: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit. Please use a smaller file.`,
             code: ERROR_CODES.INVALID_INPUT,
           },
           timestamp: new Date().toISOString(),
@@ -99,42 +129,32 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate file type
-    // If mime type is empty or standard, allow it
-    const isSupported = !file.type || SUPPORTED_FORMATS.includes(file.type);
+    const isSupported = !file.type || SUPPORTED_FORMATS.includes(mimeType);
     if (!isSupported) {
-      logger.warn('API:Upload', 'Unsupported file type', { type: file.type });
-      // We'll still try to process it if it's a known extension, but log a warning
+      logger.warn('API:Upload', 'Unsupported file type', { type: mimeType });
     }
 
-    // Save uploaded file to temporary directory
-    const tempDir = path.join(os.tmpdir(), 'faithlence-uploads');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
+    // Read file into buffer (no disk write needed — we send directly to Gemini)
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const base64Data = buffer.toString('base64');
 
-    videoFilePath = path.join(tempDir, `${Date.now()}_${file.name.replace(/\s+/g, '_')}`);
-    const buffer = await file.arrayBuffer();
-    fs.writeFileSync(videoFilePath, Buffer.from(buffer));
+    logger.debug('API:Upload', 'File read into memory', { sizeBytes: buffer.length });
 
-    logger.debug('API:Upload', 'File saved to disk', { path: videoFilePath, size: file.size });
-
-    // Extract audio from file or process image
+    // Process file based on type — NO ffmpeg needed!
     let transcription: string;
     try {
-      if (file.type.startsWith('image/')) {
+      if (mimeType.startsWith('image/')) {
+        // Image → Gemini Vision
         logger.info('API:Upload', 'Processing image with Gemini Vision...');
-        transcription = await analyzeImageWithGemini(videoFilePath!, file.type);
+        transcription = await analyzeImageWithGemini(base64Data, mimeType);
         logger.success('API:Upload', 'Image analysis complete', {
-          transcriptionLength: transcription.length
+          transcriptionLength: transcription.length,
         });
       } else {
-        logger.info('API:Upload', 'Extracting audio/processing file...');
-        audioFilePath = await extractAudioFromFile(videoFilePath!);
-
-        logger.info('API:Upload', 'Transcribing audio with Gemini...');
-        transcription = await transcribeAudioWithGemini(audioFilePath);
-
-        logger.success('API:Upload', 'Audio extraction and transcription complete', {
+        // Audio/Video → Send raw to Gemini for transcription (no ffmpeg conversion)
+        logger.info('API:Upload', 'Transcribing media directly with Gemini (no ffmpeg)...');
+        transcription = await transcribeMediaWithGemini(base64Data, mimeType);
+        logger.success('API:Upload', 'Transcription complete', {
           transcriptionLength: transcription.length,
           words: transcription.split(/\s+/).length,
         });
@@ -170,12 +190,6 @@ export async function POST(request: NextRequest) {
       });
     } catch (error) {
       logger.error('API:Upload', 'Gemini analysis failed', error);
-
-      // Clean up files before returning error
-      if (videoFilePath) {
-        try { fs.unlinkSync(videoFilePath); } catch { }
-      }
-      if (audioFilePath) cleanupAudioFile(audioFilePath);
 
       const reason = error instanceof Error ? error.message : 'Unknown AI error';
       return NextResponse.json(
@@ -217,17 +231,6 @@ export async function POST(request: NextRequest) {
       // We don't fail the whole request if DB save fails, but we log it
     }
 
-    // Clean up temporary files
-    if (videoFilePath) {
-      try {
-        fs.unlinkSync(videoFilePath);
-        logger.debug('API:Upload', 'Source file deleted', { path: videoFilePath });
-      } catch { }
-    }
-    if (audioFilePath) {
-      cleanupAudioFile(audioFilePath);
-    }
-
     logger.success('API:Upload', 'Request completed successfully');
     return NextResponse.json(
       {
@@ -242,14 +245,6 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (error) {
-    // Clean up on error
-    if (videoFilePath) {
-      try { fs.unlinkSync(videoFilePath); } catch { }
-    }
-    if (audioFilePath) {
-      cleanupAudioFile(audioFilePath);
-    }
-
     const errorMessage = error instanceof Error ? error.message : String(error || 'Unknown upload error');
     logger.error('API:Upload', 'Unhandled catch-all error', { msg: errorMessage });
     return NextResponse.json(

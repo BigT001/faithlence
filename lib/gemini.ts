@@ -14,18 +14,13 @@ logger.success('Gemini', 'API Key configured', { hasKey: !!API_KEY });
 
 const genAI = new GoogleGenerativeAI(API_KEY);
 
-export async function analyzeImageWithGemini(imagePath: string, mimeType: string): Promise<string> {
-  const fs = await import('fs');
-  logger.info('Gemini:Vision', 'Starting image analysis', { path: imagePath, mimeType });
+export async function analyzeImageWithGemini(base64Data: string, mimeType: string): Promise<string> {
+  logger.info('Gemini:Vision', 'Starting image analysis', { mimeType });
 
   try {
-    const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-flash-latest'];
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-flash-latest'];
     let lastError: any = null;
     let result: string | null = null;
-
-    // Read file
-    const imageBuffer = fs.readFileSync(imagePath);
-    const imageBase64 = imageBuffer.toString('base64');
 
     for (const modelName of modelsToTry) {
       try {
@@ -36,7 +31,7 @@ export async function analyzeImageWithGemini(imagePath: string, mimeType: string
         const response = await model.generateContent([
           {
             inlineData: {
-              data: imageBase64,
+              data: base64Data,
               mimeType: mimeType
             }
           },
