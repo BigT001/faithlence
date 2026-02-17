@@ -48,9 +48,6 @@ interface UploadResult {
 
 type UploadStage = 'idle' | 'uploading' | 'processing' | 'analyzing' | 'done' | 'error';
 
-// 4MB threshold — files under this go direct, over this use Blob
-const DIRECT_UPLOAD_LIMIT = 4 * 1024 * 1024;
-
 const STAGE_LABELS: Record<UploadStage, string> = {
   idle: '',
   uploading: 'Uploading file...',
@@ -68,129 +65,123 @@ export function FileUploadForm() {
 
   const isLoading = stage !== 'idle' && stage !== 'done' && stage !== 'error';
 
-  /**
-   * Direct upload for small files (< 4MB)
-   * Sends file directly in the request body to /api/upload
-   */
-  async function uploadDirect(file: File): Promise<UploadResult> {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('title', file.name);
-
-    const response = await fetch('/api/upload', {
-      method: 'POST',
-      body: formData,
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error?.message || `Upload failed with status ${response.status}`);
-    }
-    return data;
-  }
-
-  /**
-   * Blob upload for large files (> 4MB)
-   * Uploads to Vercel Blob first, then processes via /api/process
-   */
-  async function uploadViaBlob(file: File): Promise<UploadResult> {
-    // Dynamically import to avoid errors if @vercel/blob isn't configured
-    const { upload } = await import('@vercel/blob/client');
-
-    setStage('uploading');
-
-    let blob;
-    try {
-      blob = await upload(file.name, file, {
-        access: 'public',
-        handleUploadUrl: '/api/blob-upload',
-      });
-    } catch (err: any) {
-      // If Blob isn't configured, give a clear message
-      if (
-        err.message?.includes('BLOB_READ_WRITE_TOKEN') ||
-        err.message?.includes('Network error') ||
-        err.message?.includes('connection lost') ||
-        err.message?.includes('Failed to fetch') ||
-        err.message?.includes('401') ||
-        err.message?.includes('403')
-      ) {
-        throw new Error(
-          `This file is ${(file.size / 1024 / 1024).toFixed(1)}MB — too large for direct upload (max ${(DIRECT_UPLOAD_LIMIT / 1024 / 1024).toFixed(0)}MB). ` +
-          `Large file support requires Vercel Blob storage to be configured. ` +
-          `Please try a smaller file, or set up Vercel Blob in your project dashboard.`
-        );
-      }
-      throw err;
-    }
-
-    // Process the uploaded blob
-    setStage('processing');
-
-    const processResponse = await fetch('/api/process', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        blobUrl: blob.url,
-        fileName: file.name,
-        mimeType: file.type || 'application/octet-stream',
-        title: file.name,
-      }),
-    });
-
-    const data = await processResponse.json();
-    if (!processResponse.ok) {
-      throw new Error(data.error?.message || `Processing failed with status ${processResponse.status}`);
-    }
-    return data;
-  }
-
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setError(null);
     setResult(null);
-    setStage('idle');
 
-    // Validate file size (100MB hard limit)
-    const maxSize = 100 * 1024 * 1024;
+    // Validate file size (20MB limit for direct Gemini inline data)
+    const maxSize = 20 * 1024 * 1024;
     if (file.size > maxSize) {
-      setError(`File size exceeds 100MB limit. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+      setError(
+        `File is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). ` +
+        `Maximum supported size is 20MB. Please use a shorter audio clip or compress your file.`
+      );
       return;
     }
 
     try {
+      setStage('uploading');
+      logger.info('FileUpload', 'Starting upload', { name: file.name, size: file.size, type: file.type });
+
+      // Always try direct upload first
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('title', file.name);
+
+      let response: Response;
       let data: UploadResult;
 
-      if (file.size <= DIRECT_UPLOAD_LIMIT) {
-        // Small file → direct upload (no Blob needed)
-        logger.info('FileUpload', 'Using direct upload', { name: file.name, size: file.size });
-        setStage('uploading');
+      try {
+        response = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
 
-        // Simulate stage transitions
-        setStage('processing');
-        data = await uploadDirect(file);
-      } else {
-        // Large file → Vercel Blob upload
-        logger.info('FileUpload', 'Using Blob upload for large file', { name: file.name, size: file.size });
+        data = await response.json();
+      } catch (fetchError: any) {
+        // If the direct upload fails with a network error, it might be too large for Vercel
+        // Try Blob upload as fallback
+        logger.warn('FileUpload', 'Direct upload failed, trying Blob fallback', { error: fetchError.message });
+
         data = await uploadViaBlob(file);
+        setStage('done');
+        setResult(data);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+
+      // If we got a 413 (Payload Too Large), try Blob upload
+      if (response.status === 413) {
+        logger.warn('FileUpload', 'File too large for direct upload, trying Blob', { size: file.size });
+        data = await uploadViaBlob(file);
+        setStage('done');
+        setResult(data);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error?.message || `Upload failed with status ${response.status}`);
       }
 
       setStage('done');
       setResult(data);
 
-      // Clear input
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed';
-      logger.error('FileUpload', 'Upload/processing failed', { error: message });
+      logger.error('FileUpload', 'Upload failed', { error: message });
       setError(message);
       setStage('error');
     }
   };
+
+  /**
+   * Blob upload fallback for large files
+   */
+  async function uploadViaBlob(file: File): Promise<UploadResult> {
+    try {
+      const { upload } = await import('@vercel/blob/client');
+
+      setStage('uploading');
+
+      const blob = await upload(file.name, file, {
+        access: 'public',
+        handleUploadUrl: '/api/blob-upload',
+      });
+
+      setStage('processing');
+
+      const processResponse = await fetch('/api/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          blobUrl: blob.url,
+          fileName: file.name,
+          mimeType: file.type || 'application/octet-stream',
+          title: file.name,
+        }),
+      });
+
+      const data = await processResponse.json();
+      if (!processResponse.ok) {
+        throw new Error(data.error?.message || `Processing failed with status ${processResponse.status}`);
+      }
+      return data;
+    } catch (blobError: any) {
+      // If blob also fails, give a clear message
+      throw new Error(
+        `File upload failed. Your file may be too large for the current hosting plan. ` +
+        `Please try a smaller file (under 4MB), or contact the admin to configure large file storage. ` +
+        `(${blobError.message})`
+      );
+    }
+  }
 
   const resetForm = () => {
     setStage('idle');
@@ -199,7 +190,6 @@ export function FileUploadForm() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Calculate progress percentage based on stage
   const progress = stage === 'uploading' ? 20 : stage === 'processing' ? 50 : stage === 'analyzing' ? 80 : stage === 'done' ? 100 : 0;
 
   return (
@@ -220,7 +210,7 @@ export function FileUploadForm() {
             {isLoading ? STAGE_LABELS[stage] : 'Drop audio/video/image file here or click to select'}
           </div>
           <div className="text-sm text-gray-500">
-            Supported: Audio, Video, Images (Max 100MB)
+            Supported: Audio, Video, Images (Max 20MB)
           </div>
         </label>
       </div>
@@ -265,7 +255,6 @@ export function FileUploadForm() {
       {/* Results */}
       {result?.success && result.data && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-6 space-y-4">
-          {/* Success Header & History Warning */}
           <div className="flex flex-col gap-2">
             <h3 className="text-xl font-bold text-green-800 flex items-center gap-2">
               <span className="text-2xl">✨</span> Analysis Complete!
@@ -278,19 +267,16 @@ export function FileUploadForm() {
             )}
           </div>
 
-          {/* Title */}
           <div>
             <h4 className="font-semibold text-gray-800 mb-1">File Name</h4>
             <p className="text-gray-700">{result.data.fileName}</p>
           </div>
 
-          {/* Transcription */}
           <div>
             <h4 className="font-semibold text-gray-800 mb-1">Transcription</h4>
             <p className="text-gray-700 line-clamp-3">{result.data.analysis.transcription}</p>
           </div>
 
-          {/* Summary */}
           {result.data.analysis.summary && (
             <div>
               <h4 className="font-semibold text-gray-800 mb-1">Summary</h4>
@@ -298,7 +284,6 @@ export function FileUploadForm() {
             </div>
           )}
 
-          {/* Captions */}
           {result.data.analysis.captions && result.data.analysis.captions.length > 0 && (
             <div>
               <h4 className="font-semibold text-gray-800 mb-1">Captions</h4>
@@ -310,7 +295,6 @@ export function FileUploadForm() {
             </div>
           )}
 
-          {/* Hashtags */}
           {result.data.analysis.hashtags && result.data.analysis.hashtags.length > 0 && (
             <div>
               <h4 className="font-semibold text-gray-800 mb-2">Hashtags</h4>
@@ -324,7 +308,6 @@ export function FileUploadForm() {
             </div>
           )}
 
-          {/* Faith Stories */}
           {result.data.analysis.faithStories && result.data.analysis.faithStories.length > 0 && (
             <div>
               <h4 className="font-semibold text-gray-800 mb-2">Faith Stories</h4>
@@ -338,7 +321,6 @@ export function FileUploadForm() {
             </div>
           )}
 
-          {/* Scriptures */}
           {result.data.analysis.scriptures && result.data.analysis.scriptures.length > 0 && (
             <div>
               <h4 className="font-semibold text-gray-800 mb-2">Scriptures</h4>
@@ -352,12 +334,10 @@ export function FileUploadForm() {
             </div>
           )}
 
-          {/* Deep Analysis Section */}
           {result.data.analysis.deepAnalysis && (
             <div className="border-t-2 border-gray-300 pt-4 mt-4">
               <h3 className="text-xl font-bold text-gray-900 mb-4">🔍 Deep Analysis</h3>
 
-              {/* Overall Message */}
               {result.data.analysis.deepAnalysis.overallMessage && (
                 <div className="bg-purple-50 border-l-4 border-purple-500 p-4 mb-4">
                   <h4 className="font-semibold text-purple-900 mb-2">💡 Core Message</h4>
@@ -365,7 +345,6 @@ export function FileUploadForm() {
                 </div>
               )}
 
-              {/* Key Quotes Analysis */}
               {result.data.analysis.deepAnalysis.keyQuotes && result.data.analysis.deepAnalysis.keyQuotes.length > 0 && (
                 <div className="mb-4">
                   <h4 className="font-semibold text-gray-800 mb-3">📝 Key Quotes (Word-by-Word Analysis)</h4>
@@ -398,7 +377,6 @@ export function FileUploadForm() {
                 </div>
               )}
 
-              {/* Theological Views */}
               {result.data.analysis.deepAnalysis.theologicalViews && result.data.analysis.deepAnalysis.theologicalViews.length > 0 && (
                 <div className="mb-4">
                   <h4 className="font-semibold text-gray-800 mb-3">📖 Theological Perspectives</h4>
@@ -434,7 +412,6 @@ export function FileUploadForm() {
                 </div>
               )}
 
-              {/* Positivity Insights */}
               {result.data.analysis.deepAnalysis.positivityInsights && result.data.analysis.deepAnalysis.positivityInsights.length > 0 && (
                 <div className="mb-4">
                   <h4 className="font-semibold text-gray-800 mb-3">✨ Positivity & Uplifting Insights</h4>
@@ -453,7 +430,6 @@ export function FileUploadForm() {
             </div>
           )}
 
-          {/* Social Media Hooks */}
           {result.data.analysis.socialMediaHooks && result.data.analysis.socialMediaHooks.length > 0 && (
             <div className="border-t-2 border-gray-300 pt-4 mt-4">
               <h3 className="text-xl font-bold text-gray-900 mb-4">🚀 Social Media Hooks</h3>
@@ -471,7 +447,6 @@ export function FileUploadForm() {
             </div>
           )}
 
-          {/* Upload Another */}
           <button
             onClick={() => {
               resetForm();
