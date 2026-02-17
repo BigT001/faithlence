@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useRef } from 'react';
-import { upload } from '@vercel/blob/client';
 import { logger } from '@/lib/logger';
 
 interface UploadResult {
@@ -49,13 +48,16 @@ interface UploadResult {
 
 type UploadStage = 'idle' | 'uploading' | 'processing' | 'analyzing' | 'done' | 'error';
 
-const STAGE_INFO: Record<UploadStage, { label: string; progress: number }> = {
-  idle: { label: '', progress: 0 },
-  uploading: { label: 'Uploading file to cloud storage...', progress: 20 },
-  processing: { label: 'Transcribing your media with AI...', progress: 50 },
-  analyzing: { label: 'Deep analysis in progress — finding insights...', progress: 80 },
-  done: { label: 'Complete!', progress: 100 },
-  error: { label: 'Something went wrong', progress: 0 },
+// 4MB threshold — files under this go direct, over this use Blob
+const DIRECT_UPLOAD_LIMIT = 4 * 1024 * 1024;
+
+const STAGE_LABELS: Record<UploadStage, string> = {
+  idle: '',
+  uploading: 'Uploading file...',
+  processing: 'Transcribing your media with AI...',
+  analyzing: 'Deep analysis in progress — finding insights...',
+  done: 'Complete!',
+  error: 'Something went wrong',
 };
 
 export function FileUploadForm() {
@@ -65,7 +67,83 @@ export function FileUploadForm() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isLoading = stage !== 'idle' && stage !== 'done' && stage !== 'error';
-  const stageInfo = STAGE_INFO[stage];
+
+  /**
+   * Direct upload for small files (< 4MB)
+   * Sends file directly in the request body to /api/upload
+   */
+  async function uploadDirect(file: File): Promise<UploadResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('title', file.name);
+
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error?.message || `Upload failed with status ${response.status}`);
+    }
+    return data;
+  }
+
+  /**
+   * Blob upload for large files (> 4MB)
+   * Uploads to Vercel Blob first, then processes via /api/process
+   */
+  async function uploadViaBlob(file: File): Promise<UploadResult> {
+    // Dynamically import to avoid errors if @vercel/blob isn't configured
+    const { upload } = await import('@vercel/blob/client');
+
+    setStage('uploading');
+
+    let blob;
+    try {
+      blob = await upload(file.name, file, {
+        access: 'public',
+        handleUploadUrl: '/api/blob-upload',
+      });
+    } catch (err: any) {
+      // If Blob isn't configured, give a clear message
+      if (
+        err.message?.includes('BLOB_READ_WRITE_TOKEN') ||
+        err.message?.includes('Network error') ||
+        err.message?.includes('connection lost') ||
+        err.message?.includes('Failed to fetch') ||
+        err.message?.includes('401') ||
+        err.message?.includes('403')
+      ) {
+        throw new Error(
+          `This file is ${(file.size / 1024 / 1024).toFixed(1)}MB — too large for direct upload (max ${(DIRECT_UPLOAD_LIMIT / 1024 / 1024).toFixed(0)}MB). ` +
+          `Large file support requires Vercel Blob storage to be configured. ` +
+          `Please try a smaller file, or set up Vercel Blob in your project dashboard.`
+        );
+      }
+      throw err;
+    }
+
+    // Process the uploaded blob
+    setStage('processing');
+
+    const processResponse = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        blobUrl: blob.url,
+        fileName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        title: file.name,
+      }),
+    });
+
+    const data = await processResponse.json();
+    if (!processResponse.ok) {
+      throw new Error(data.error?.message || `Processing failed with status ${processResponse.status}`);
+    }
+    return data;
+  }
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -75,7 +153,7 @@ export function FileUploadForm() {
     setResult(null);
     setStage('idle');
 
-    // Validate file size (100MB limit — Vercel Blob handles large files)
+    // Validate file size (100MB hard limit)
     const maxSize = 100 * 1024 * 1024;
     if (file.size > maxSize) {
       setError(`File size exceeds 100MB limit. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
@@ -83,37 +161,20 @@ export function FileUploadForm() {
     }
 
     try {
-      // ─── Step 1: Upload to Vercel Blob ───
-      setStage('uploading');
-      logger.info('FileUpload', 'Starting blob upload', { name: file.name, size: file.size, type: file.type });
+      let data: UploadResult;
 
-      const blob = await upload(file.name, file, {
-        access: 'public',
-        handleUploadUrl: '/api/blob-upload',
-      });
+      if (file.size <= DIRECT_UPLOAD_LIMIT) {
+        // Small file → direct upload (no Blob needed)
+        logger.info('FileUpload', 'Using direct upload', { name: file.name, size: file.size });
+        setStage('uploading');
 
-      logger.success('FileUpload', 'Blob upload complete', { url: blob.url });
-
-      // ─── Step 2: Process with Gemini ───
-      setStage('processing');
-
-      const processResponse = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          blobUrl: blob.url,
-          fileName: file.name,
-          mimeType: file.type || 'application/octet-stream',
-          title: file.name,
-        }),
-      });
-
-      setStage('analyzing');
-
-      const data: UploadResult = await processResponse.json();
-
-      if (!processResponse.ok) {
-        throw new Error(data.error?.message || `Processing failed with status ${processResponse.status}`);
+        // Simulate stage transitions
+        setStage('processing');
+        data = await uploadDirect(file);
+      } else {
+        // Large file → Vercel Blob upload
+        logger.info('FileUpload', 'Using Blob upload for large file', { name: file.name, size: file.size });
+        data = await uploadViaBlob(file);
       }
 
       setStage('done');
@@ -138,6 +199,9 @@ export function FileUploadForm() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  // Calculate progress percentage based on stage
+  const progress = stage === 'uploading' ? 20 : stage === 'processing' ? 50 : stage === 'analyzing' ? 80 : stage === 'done' ? 100 : 0;
+
   return (
     <div className="space-y-6">
       {/* File Upload Input */}
@@ -153,7 +217,7 @@ export function FileUploadForm() {
         />
         <label htmlFor="fileInput" className={isLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}>
           <div className="text-lg font-semibold text-gray-700 mb-2">
-            {isLoading ? stageInfo.label : 'Drop audio/video/image file here or click to select'}
+            {isLoading ? STAGE_LABELS[stage] : 'Drop audio/video/image file here or click to select'}
           </div>
           <div className="text-sm text-gray-500">
             Supported: Audio, Video, Images (Max 100MB)
@@ -165,8 +229,8 @@ export function FileUploadForm() {
       {isLoading && (
         <div className="space-y-2">
           <div className="flex justify-between text-sm font-medium text-gray-600">
-            <span>{stageInfo.label}</span>
-            <span>{stageInfo.progress}%</span>
+            <span>{STAGE_LABELS[stage]}</span>
+            <span>{progress}%</span>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-2">
             <div
@@ -174,11 +238,11 @@ export function FileUploadForm() {
                   stage === 'processing' ? 'bg-purple-500' :
                     'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]'
                 }`}
-              style={{ width: `${stageInfo.progress}%` }}
+              style={{ width: `${progress}%` }}
             />
           </div>
           <p className="text-xs text-gray-500 text-center animate-pulse">
-            {stage === 'uploading' && 'Securely uploading your file to cloud storage...'}
+            {stage === 'uploading' && 'Uploading your file...'}
             {stage === 'processing' && 'Our AI is listening to every word. This may take a moment for longer files...'}
             {stage === 'analyzing' && 'Uncovering deep insights, scriptures, and faith-based content...'}
           </p>
