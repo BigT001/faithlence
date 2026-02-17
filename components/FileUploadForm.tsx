@@ -127,16 +127,16 @@ export function FileUploadForm() {
           type="file"
           onChange={handleFileChange}
           disabled={isLoading}
-          accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.aac,.mov,.avi,.3gp"
+          accept="audio/*,video/*,image/*,.mp3,.mp4,.wav,.m4a,.aac,.mov,.avi,.3gp,.jpg,.jpeg,.png,.webp,.heic"
           className="hidden"
           id="fileInput"
         />
         <label htmlFor="fileInput" className={isLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}>
           <div className="text-lg font-semibold text-gray-700 mb-2">
-            {isLoading ? 'Processing...' : 'Drop audio/video file here or click to select'}
+            {isLoading ? 'Processing...' : 'Drop audio/video/image file here or click to select'}
           </div>
           <div className="text-sm text-gray-500">
-            Supported: MP3, MP4, WAV, OGG, WebM, AAC, FLAC, MOV, AVI (Max 25MB)
+            Supported: Audio, Video, Images (Max 500MB)
           </div>
         </label>
       </div>

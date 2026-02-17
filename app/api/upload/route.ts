@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { extractAudioFromFile, transcribeAudioWithGemini, cleanupAudioFile } from '@/lib/audioExtractor';
-import { analyzeWithGemini } from '@/lib/gemini';
+import { analyzeWithGemini, analyzeImageWithGemini } from '@/lib/gemini';
 import { connectDB } from '@/lib/mongodb';
 import { ContentModel } from '@/lib/models';
 import { ERROR_CODES } from '@/lib/apiResponse';
@@ -38,7 +38,14 @@ const SUPPORTED_FORMATS = [
   'audio/amr',
   'audio/3gpp',
   'audio/3gpp2',
+  'audio/3gpp2',
   'audio/x-aiff',
+  // Images
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'image/heif',
 ];
 
 export async function POST(request: NextRequest) {
@@ -111,26 +118,34 @@ export async function POST(request: NextRequest) {
 
     logger.debug('API:Upload', 'File saved to disk', { path: videoFilePath, size: file.size });
 
-    // Extract audio from file
+    // Extract audio from file or process image
     let transcription: string;
     try {
-      logger.info('API:Upload', 'Extracting audio/processing file...');
-      audioFilePath = await extractAudioFromFile(videoFilePath);
+      if (file.type.startsWith('image/')) {
+        logger.info('API:Upload', 'Processing image with Gemini Vision...');
+        transcription = await analyzeImageWithGemini(videoFilePath!, file.type);
+        logger.success('API:Upload', 'Image analysis complete', {
+          transcriptionLength: transcription.length
+        });
+      } else {
+        logger.info('API:Upload', 'Extracting audio/processing file...');
+        audioFilePath = await extractAudioFromFile(videoFilePath!);
 
-      logger.info('API:Upload', 'Transcribing audio with Gemini...');
-      transcription = await transcribeAudioWithGemini(audioFilePath);
+        logger.info('API:Upload', 'Transcribing audio with Gemini...');
+        transcription = await transcribeAudioWithGemini(audioFilePath);
 
-      logger.success('API:Upload', 'Audio extraction and transcription complete', {
-        transcriptionLength: transcription.length,
-        words: transcription.split(/\s+/).length,
-      });
+        logger.success('API:Upload', 'Audio extraction and transcription complete', {
+          transcriptionLength: transcription.length,
+          words: transcription.split(/\s+/).length,
+        });
+      }
     } catch (error) {
-      logger.error('API:Upload', 'Audio processing failed', error);
+      logger.error('API:Upload', 'Processing failed', error);
       return NextResponse.json(
         {
           success: false,
           error: {
-            message: `Audio processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            message: `Processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
             code: ERROR_CODES.EXTERNAL_SERVICE_ERROR,
             details: { originalError: error instanceof Error ? error.message : 'Unknown error' },
           },

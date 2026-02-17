@@ -14,6 +14,59 @@ logger.success('Gemini', 'API Key configured', { hasKey: !!API_KEY });
 
 const genAI = new GoogleGenerativeAI(API_KEY);
 
+export async function analyzeImageWithGemini(imagePath: string, mimeType: string): Promise<string> {
+  const fs = await import('fs');
+  logger.info('Gemini:Vision', 'Starting image analysis', { path: imagePath, mimeType });
+
+  try {
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-flash-latest'];
+    let lastError: any = null;
+    let result: string | null = null;
+
+    // Read file
+    const imageBuffer = fs.readFileSync(imagePath);
+    const imageBase64 = imageBuffer.toString('base64');
+
+    for (const modelName of modelsToTry) {
+      try {
+        const model = genAI.getGenerativeModel({ model: modelName });
+
+        const prompt = "Analyze this image in detail. Extract any text visible, describe the visual elements, context, and mood. If it's a screenshot of text, transcribe it. Provide a comprehensive textual representation of the image content.";
+
+        const response = await model.generateContent([
+          {
+            inlineData: {
+              data: imageBase64,
+              mimeType: mimeType
+            }
+          },
+          prompt
+        ]);
+
+        const text = response.response.text();
+        if (text) {
+          result = text;
+          logger.success('Gemini:Vision', `Successfully analyzed image with ${modelName}`);
+          break;
+        }
+      } catch (error: any) {
+        lastError = error;
+        logger.warn('Gemini:Vision', `Model ${modelName} failed`, { error: error.message });
+        continue;
+      }
+    }
+
+    if (!result) {
+      throw lastError || new Error('All Gemini Vision models failed');
+    }
+
+    return result;
+  } catch (error) {
+    logger.error('Gemini:Vision', 'Image analysis failed', error);
+    throw error;
+  }
+}
+
 export async function analyzeWithGemini(transcription: string): Promise<AnalysisResult> {
   logger.info('Gemini', 'Starting analysis', { textLength: transcription.length });
 

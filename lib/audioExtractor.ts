@@ -13,19 +13,29 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffprobeStatic from 'ffprobe-static';
 
 // Set ffmpeg path
-let ffmpegPath = ffmpegStatic;
-if (os.platform() === 'win32' && ffmpegPath && (ffmpegPath.startsWith('\\ROOT') || !fs.existsSync(ffmpegPath))) {
-  // Fix for weird pnpm/windows paths
-  const possiblePaths = [
-    path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
-    path.join(process.cwd(), '..', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'), // In case of monorepo
-  ];
+let ffmpegPath: string | null = ffmpegStatic;
+
+// Enhanced path resolution for different environments
+if (ffmpegPath && !fs.existsSync(ffmpegPath)) {
+  // Try to resolve properly if the default path is invalid (common in some monorepos or pnpm setups)
   try {
     const pkgPath = require.resolve('ffmpeg-static');
-    possiblePaths.unshift(path.join(path.dirname(pkgPath), 'ffmpeg.exe'));
+    const possiblePath = path.join(path.dirname(pkgPath), os.platform() === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    if (fs.existsSync(possiblePath)) {
+      ffmpegPath = possiblePath;
+    }
   } catch (e) {
-    // ignore
+    logger.warn('AudioExtractor:Setup', 'Failed to resolve ffmpeg-static path via require', e);
   }
+}
+
+// Windows specific fix (legacy support)
+if (os.platform() === 'win32' && ffmpegPath && (ffmpegPath.startsWith('\\ROOT') || !fs.existsSync(ffmpegPath))) {
+  const possiblePaths = [
+    path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
+    path.join(process.cwd(), '..', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
+    path.join(process.cwd(), 'resources', 'ffmpeg.exe'),
+  ];
 
   for (const p of possiblePaths) {
     if (fs.existsSync(p)) {
@@ -35,29 +45,32 @@ if (os.platform() === 'win32' && ffmpegPath && (ffmpegPath.startsWith('\\ROOT') 
   }
 }
 
-if (ffmpegPath) {
+if (ffmpegPath && fs.existsSync(ffmpegPath)) {
   logger.info('AudioExtractor:Setup', 'Setting ffmpeg path', { path: ffmpegPath });
   ffmpeg.setFfmpegPath(ffmpegPath);
 } else {
-  logger.error('AudioExtractor:Setup', 'ffmpeg-static not found or invalid path', { original: ffmpegStatic });
+  logger.warn('AudioExtractor:Setup', 'ffmpeg-static binary not found. Will attempt to use system ffmpeg if available.');
+  // We don't error here, allowing fallback to system PATH "ffmpeg", but we log it.
 }
 
 // Set ffprobe path
-let ffprobePath = ffprobeStatic.path;
+let ffprobePath: string | null = ffprobeStatic.path;
+
+if (ffprobePath && !fs.existsSync(ffprobePath)) {
+  try {
+    const pkgPath = require.resolve('ffprobe-static');
+    const possiblePath = path.join(path.dirname(pkgPath), 'bin', os.platform() === 'win32' ? 'win32' : 'linux', os.arch(), os.platform() === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+    if (fs.existsSync(possiblePath)) {
+      ffprobePath = possiblePath;
+    }
+  } catch (e) { /* ignore */ }
+}
+
 if (os.platform() === 'win32' && ffprobePath && (ffprobePath.startsWith('\\ROOT') || !fs.existsSync(ffprobePath))) {
-  // Fix for weird pnpm/windows paths for ffprobe
   const possiblePaths = [
     path.join(process.cwd(), 'node_modules', 'ffprobe-static', 'bin', 'win32', 'x64', 'ffprobe.exe'),
     path.join(process.cwd(), '..', 'node_modules', 'ffprobe-static', 'bin', 'win32', 'x64', 'ffprobe.exe'),
   ];
-  try {
-    const pkgPath = require.resolve('ffprobe-static');
-    possiblePaths.unshift(path.join(path.dirname(pkgPath), 'bin', 'win32', 'x64', 'ffprobe.exe'));
-    // Also try the path returned by the package itself if it helps to re-resolve relative to cwd
-    if (ffprobePath) possiblePaths.push(path.resolve(ffprobePath));
-  } catch (e) {
-    // ignore
-  }
 
   for (const p of possiblePaths) {
     if (fs.existsSync(p)) {
@@ -67,11 +80,11 @@ if (os.platform() === 'win32' && ffprobePath && (ffprobePath.startsWith('\\ROOT'
   }
 }
 
-if (ffprobePath) {
+if (ffprobePath && fs.existsSync(ffprobePath)) {
   logger.info('AudioExtractor:Setup', 'Setting ffprobe path', { path: ffprobePath });
   ffmpeg.setFfprobePath(ffprobePath);
 } else {
-  logger.error('AudioExtractor:Setup', 'ffprobe-static not found or invalid path', { original: ffprobeStatic });
+  logger.warn('AudioExtractor:Setup', 'ffprobe-static binary not found. Will attempt to use system ffprobe if available.');
 }
 
 const TEMP_DIR = path.join(os.tmpdir(), 'faithlence-audio');
