@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef } from 'react';
+import { upload } from '@vercel/blob/client';
 import { logger } from '@/lib/logger';
 
 interface UploadResult {
@@ -46,12 +47,25 @@ interface UploadResult {
   };
 }
 
+type UploadStage = 'idle' | 'uploading' | 'processing' | 'analyzing' | 'done' | 'error';
+
+const STAGE_INFO: Record<UploadStage, { label: string; progress: number }> = {
+  idle: { label: '', progress: 0 },
+  uploading: { label: 'Uploading file to cloud storage...', progress: 20 },
+  processing: { label: 'Transcribing your media with AI...', progress: 50 },
+  analyzing: { label: 'Deep analysis in progress — finding insights...', progress: 80 },
+  done: { label: 'Complete!', progress: 100 },
+  error: { label: 'Something went wrong', progress: 0 },
+};
+
 export function FileUploadForm() {
-  const [isLoading, setIsLoading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  const [stage, setStage] = useState<UploadStage>('idle');
   const [result, setResult] = useState<UploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const isLoading = stage !== 'idle' && stage !== 'done' && stage !== 'error';
+  const stageInfo = STAGE_INFO[stage];
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -59,51 +73,50 @@ export function FileUploadForm() {
 
     setError(null);
     setResult(null);
-    setIsLoading(true);
-    setUploadProgress(0);
+    setStage('idle');
+
+    // Validate file size (100MB limit — Vercel Blob handles large files)
+    const maxSize = 100 * 1024 * 1024;
+    if (file.size > maxSize) {
+      setError(`File size exceeds 100MB limit. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+      return;
+    }
 
     try {
-      // Validate file size (500MB limit)
-      const maxSize = 500 * 1024 * 1024;
-      if (file.size > maxSize) {
-        throw new Error(`File size exceeds 500MB limit. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
-      }
+      // ─── Step 1: Upload to Vercel Blob ───
+      setStage('uploading');
+      logger.info('FileUpload', 'Starting blob upload', { name: file.name, size: file.size, type: file.type });
 
-      // Validate file type
-      const supportedTypes = [
-        'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/x-aac', 'audio/ogg', 'audio/webm',
-        'audio/flac', 'audio/x-m4a', 'audio/mp4', 'audio/amr', 'audio/3gpp', 'audio/3gpp2', 'audio/x-aiff',
-        'video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'video/mpeg', 'video/3gpp',
-      ];
-
-      // Relaxed validation: if file.type is empty (common for some rare types), we rely on server validation
-      if (file.type && !supportedTypes.includes(file.type)) {
-        logger.warn('FileUpload', `File type ${file.type} might be unsupported, but allowing for server-side check`);
-      }
-
-      // Create form data
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('title', file.name);
-
-      // Track upload progress
-      setUploadProgress(10);
-
-      // Upload file
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
+      const blob = await upload(file.name, file, {
+        access: 'public',
+        handleUploadUrl: '/api/blob-upload',
       });
 
-      setUploadProgress(50);
+      logger.success('FileUpload', 'Blob upload complete', { url: blob.url });
 
-      const data: UploadResult = await response.json();
+      // ─── Step 2: Process with Gemini ───
+      setStage('processing');
 
-      if (!response.ok) {
-        throw new Error(data.error?.message || `Upload failed with status ${response.status}`);
+      const processResponse = await fetch('/api/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          blobUrl: blob.url,
+          fileName: file.name,
+          mimeType: file.type || 'application/octet-stream',
+          title: file.name,
+        }),
+      });
+
+      setStage('analyzing');
+
+      const data: UploadResult = await processResponse.json();
+
+      if (!processResponse.ok) {
+        throw new Error(data.error?.message || `Processing failed with status ${processResponse.status}`);
       }
 
-      setUploadProgress(100);
+      setStage('done');
       setResult(data);
 
       // Clear input
@@ -111,11 +124,18 @@ export function FileUploadForm() {
         fileInputRef.current.value = '';
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
-      setUploadProgress(0);
-    } finally {
-      setIsLoading(false);
+      const message = err instanceof Error ? err.message : 'Upload failed';
+      logger.error('FileUpload', 'Upload/processing failed', { error: message });
+      setError(message);
+      setStage('error');
     }
+  };
+
+  const resetForm = () => {
+    setStage('idle');
+    setResult(null);
+    setError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   return (
@@ -133,10 +153,10 @@ export function FileUploadForm() {
         />
         <label htmlFor="fileInput" className={isLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}>
           <div className="text-lg font-semibold text-gray-700 mb-2">
-            {isLoading ? 'Processing...' : 'Drop audio/video/image file here or click to select'}
+            {isLoading ? stageInfo.label : 'Drop audio/video/image file here or click to select'}
           </div>
           <div className="text-sm text-gray-500">
-            Supported: Audio, Video, Images (Max 500MB)
+            Supported: Audio, Video, Images (Max 100MB)
           </div>
         </label>
       </div>
@@ -145,18 +165,22 @@ export function FileUploadForm() {
       {isLoading && (
         <div className="space-y-2">
           <div className="flex justify-between text-sm font-medium text-gray-600">
-            <span>{uploadProgress < 50 ? 'Uploading file...' : uploadProgress < 90 ? 'Compressing & Extracting Audio...' : 'AI Analysis in progress...'}</span>
-            <span>{uploadProgress}%</span>
+            <span>{stageInfo.label}</span>
+            <span>{stageInfo.progress}%</span>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-2">
             <div
-              className={`h-2 rounded-full transition-all duration-500 ${uploadProgress < 50 ? 'bg-blue-500' : uploadProgress < 90 ? 'bg-purple-500' : 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]'
+              className={`h-2 rounded-full transition-all duration-700 ease-out ${stage === 'uploading' ? 'bg-blue-500' :
+                  stage === 'processing' ? 'bg-purple-500' :
+                    'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]'
                 }`}
-              style={{ width: `${uploadProgress}%` }}
+              style={{ width: `${stageInfo.progress}%` }}
             />
           </div>
           <p className="text-xs text-gray-500 text-center animate-pulse">
-            {uploadProgress >= 90 ? 'Our AI is deep-diving into your content. This might take a moment...' : 'Processing your media for the best results...'}
+            {stage === 'uploading' && 'Securely uploading your file to cloud storage...'}
+            {stage === 'processing' && 'Our AI is listening to every word. This may take a moment for longer files...'}
+            {stage === 'analyzing' && 'Uncovering deep insights, scriptures, and faith-based content...'}
           </p>
         </div>
       )}
@@ -165,6 +189,12 @@ export function FileUploadForm() {
       {error && (
         <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
           <strong>Error:</strong> {error}
+          <button
+            onClick={resetForm}
+            className="ml-4 text-sm underline hover:text-red-900"
+          >
+            Try Again
+          </button>
         </div>
       )}
 
@@ -179,7 +209,7 @@ export function FileUploadForm() {
             {!result.data.id && (
               <div className="bg-amber-100 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm flex items-center gap-2 animate-pulse">
                 <span>⚠️</span>
-                <span><strong>Note:</strong> This analysis couldn't be saved to your history due to a temporary database connection issue.</span>
+                <span><strong>Note:</strong> This analysis couldn&apos;t be saved to your history due to a temporary database connection issue.</span>
               </div>
             )}
           </div>
@@ -279,7 +309,7 @@ export function FileUploadForm() {
                     {result.data.analysis.deepAnalysis.keyQuotes.map((quote: any, i: number) => (
                       <div key={i} className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                         <blockquote className="text-blue-900 font-medium italic mb-2 border-l-4 border-blue-500 pl-3">
-                          "{quote.quote}"
+                          &ldquo;{quote.quote}&rdquo;
                         </blockquote>
                         {quote.timestamp && (
                           <p className="text-xs text-blue-600 mb-2">⏱️ {quote.timestamp}</p>
@@ -380,7 +410,7 @@ export function FileUploadForm() {
           {/* Upload Another */}
           <button
             onClick={() => {
-              setResult(null);
+              resetForm();
               if (fileInputRef.current) fileInputRef.current.click();
             }}
             className="w-full mt-4 bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded transition"
